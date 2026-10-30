@@ -79,7 +79,7 @@ public class Startup
                         {
                             try
                             {
-                                var currentVer = Assembly.GetEntryAssembly().GetName().Version;
+                                var currentVer = Version.Parse(FileVersionInfo.GetVersionInfo(strExeFilePath).FileVersion);
                                 var fv = FileVersionInfo.GetVersionInfo(action).FileVersion.Split('.');
                                 var scheduledVer = new Version(
                                     int.Parse(fv[0]),

@@ -12,6 +12,7 @@ namespace GHelper
 {
     public partial class Fans : RForm
     {
+        private static bool N1xRestricted => AsusACPI.N1xRestricted;
 
         int curIndex = -1;
         DataPoint? curPoint = null;
@@ -48,6 +49,39 @@ namespace GHelper
             InitializeComponent();
 
             fanSensorControl = new FanSensorControl(this);
+            if (N1xRestricted)
+            {
+                var telemetryButton = new Button { Text = "N1X Sensors (Read-only)", Dock = DockStyle.Top, Height = 42, AutoSize = true };
+                N1xTelemetryForm? telemetry = null;
+                telemetryButton.Click += (_, _) =>
+                {
+                    if (telemetry is null || telemetry.IsDisposed) telemetry = new N1xTelemetryForm();
+                    telemetry.Show(this);
+                    telemetry.Activate();
+                };
+                Controls.Add(telemetryButton);
+                telemetryButton.SendToBack(); // top docks before the existing Fill layout
+                var profileButton = new Button { Text = "N1X 제조사 팬 테이블 · 하한 · 전력 원본 (적용 미검증)", Dock = DockStyle.Top, Height = 42, AutoSize = true };
+                N1xProfileInspectorForm? profile = null;
+                profileButton.Click += (_, _) =>
+                {
+                    if (profile is null || profile.IsDisposed) profile = new N1xProfileInspectorForm();
+                    profile.Show(this);
+                    profile.Activate();
+                };
+                Controls.Add(profileButton);
+                profileButton.SendToBack();
+                var draftButton = new Button { Text = "N1X 수동·커스텀 전력 초안 저장 (실제 적용 미구현)", Dock = DockStyle.Top, Height = 42, AutoSize = true };
+                GHelper.Power.PowerProfileForm? drafts = null;
+                draftButton.Click += (_, _) =>
+                {
+                    if (drafts is null || drafts.IsDisposed) drafts = new GHelper.Power.PowerProfileForm(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GHelper", "n1x-power-drafts.json"));
+                    drafts.Show(this);
+                    drafts.Activate();
+                };
+                Controls.Add(draftButton);
+                draftButton.SendToBack();
+            }
 
             //float dpi = ControlHelper.GetDpiScale(this).Value;
             //comboModes.Size = new Size(comboModes.Width, (int)dpi * 18);
@@ -247,17 +281,15 @@ namespace GHelper
             trackTemp.Minimum = CpuInfo.MinTemp;
             trackTemp.Maximum = CpuInfo.DefaultTemp;
 
-            comboPowerMode.DropDownStyle = ComboBoxStyle.DropDownList;
-            comboPowerMode.DataSource = new BindingSource(PowerNative.powerModes, null);
-            comboPowerMode.DisplayMember = "Value";
-            comboPowerMode.ValueMember = "Key";
+            // The single per-mode Windows power selector now lives on the main performance card.
+            // CPU boost stays independent here; no second control can race/overwrite the association.
+            panelPowerMode.Visible = false;
 
             FillModes(false);
             InitAll();
             InitCPU();
 
             comboBoost.SelectedValueChanged += ComboBoost_Changed;
-            comboPowerMode.SelectedValueChanged += ComboPowerMode_Changed;
 
 
             comboModes.SelectionChangeCommitted += ComboModes_SelectedValueChanged;
@@ -939,28 +971,9 @@ namespace GHelper
             if (boost >= 0)
                 comboBoost.SelectedIndex = Math.Min(boost, comboBoost.Items.Count - 1);
 
-            string powerMode = PowerNative.GetPowerMode();
-            bool batterySaver = PowerNative.GetBatterySaverStatus();
-
-            comboPowerMode.Enabled = !batterySaver;
-
-            if (batterySaver)
-                comboPowerMode.SelectedIndex = 0;
-            else
-                comboPowerMode.SelectedValue = powerMode;
 
         }
 
-        private void ComboPowerMode_Changed(object? sender, EventArgs e)
-        {
-            string powerMode = (string)comboPowerMode.SelectedValue;
-            PowerNative.SetPowerMode(powerMode);
-
-            if (PowerNative.GetDefaultPowerMode(Modes.GetCurrentBase()) != powerMode)
-                AppConfig.SetMode("powermode", powerMode);
-            else
-                AppConfig.RemoveMode("powermode");
-        }
 
         private void ComboBoost_Changed(object? sender, EventArgs e)
         {
@@ -993,6 +1006,7 @@ namespace GHelper
 
         public void InitAxis()
         {
+            if (N1xRestricted) return;
             if (this == null || this.Text == "") return;
 
             Invoke(delegate
@@ -1023,6 +1037,16 @@ namespace GHelper
 
         public void InitPower()
         {
+            if (N1xRestricted)
+            {
+                panelTitleCPU.Visible = panelApplyPower.Visible = true;
+                checkApplyPower.Checked = false;
+                checkApplyPower.Enabled = false;
+                checkApplyPower.Text = "N1X CPU 전력제한: 쓰기·적용 확인 미검증";
+                panelTotal.Visible = panelSlow.Visible = panelFast.Visible = panelCPU.Visible = false;
+                panelCrossLoad.Visible = panelGPUtoCPU.Visible = panelCPUTemp.Visible = false;
+                return; // Do not save generic 80W defaults as N1X firmware values.
+            }
 
             bool modeA = Program.acpi.IsSupported(AsusACPI.PPT_APUA0) || CpuInfo.IsAMD;
             bool modeB0 = Program.acpi.IsAllAmdPPT();
@@ -1176,6 +1200,23 @@ namespace GHelper
 
         public void InitFans()
         {
+            if (N1xRestricted)
+            {
+                seriesCPU.Points.Clear(); seriesGPU.Points.Clear();
+                seriesMid.Points.Clear(); seriesXGM.Points.Clear();
+                chartCPU.Visible = chartGPU.Visible = chartMid.Visible = chartXGM.Visible = false;
+                checkApplyFans.Checked = false;
+                checkApplyFans.Enabled = buttonCalibrate.Enabled = buttonReset.Enabled = false;
+                checkApplyFans.Text = N1xFanPowerPolicy.Unverified;
+                panelHysteresis.Visible = true;
+                trackHysteresisUp.Enabled = trackHysteresisDown.Enabled = false;
+                labelHysteresisUpValue.Text = labelHysteresisDownValue.Text = "쓰기 미검증";
+                labelFans.Text = "N1X 팬 커브: 제조사 경로 확인 / GHelper 쓰기 미검증";
+                labelFansResult.Text = "RPM: ATK DSTS 읽기 (100 RPM 단위). 커브 최대 RPM·전력값은 추정하지 않습니다.";
+                labelFansResult.Visible = true;
+                N1xFanLayout.ShowUnavailable(panelApplyFans, labelFansResult, checkApplyFans, buttonReset, buttonCalibrate, tableFanCharts, checkFanClamp);
+                return; // Never generate substitute curves or assumed 6200RPM axes.
+            }
 
             int chartCount = 2;
 

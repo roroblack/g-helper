@@ -166,6 +166,10 @@ namespace GHelper.Overlay
         private string _cpuFanNum = "";
         private string _gpuPow = "";
         private string _cpuPow = "";
+        private GHelper.Fan.ThermalZoneReader? overlayThermalZones;
+        private string _overlayThrm = "THRM (임시): N/A";
+        private string _cpuMemoryPow = "CPU+Memory (W): N/A";
+        private bool _showCpuMemoryPower;
         private int? _gpuUsage;
         private int? _cpuUsage;
         private int? _vramUsage;
@@ -184,8 +188,8 @@ namespace GHelper.Overlay
         private static readonly SolidBrush _batBoltBrush = new(Color.FromArgb(255, 25, 25, 25));
 
         private const int HistoryLength = 60;
-        private readonly float[] _cpuHistory = new float[HistoryLength];
-        private readonly float[] _gpuHistory = new float[HistoryLength];
+        private readonly float[] _cpuHistory = Enumerable.Repeat(float.NaN, HistoryLength).ToArray();
+        private readonly float[] _gpuHistory = Enumerable.Repeat(float.NaN, HistoryLength).ToArray();
         private int _historyHead = 0;
 
         private readonly System.Timers.Timer _timer = new(1000) { AutoReset = true };
@@ -346,13 +350,13 @@ namespace GHelper.Overlay
         }
 
         private static int S(float sc, int v) => (int)(v * sc);
-        private static double D(object? v) { try { return v is null ? 0.0 : Convert.ToDouble(v); } catch { return 0.0; } }
+        private static double D(object? v) { try { double n = v is null ? double.NaN : Convert.ToDouble(v); return double.IsFinite(n) && n >= 0 ? n : double.NaN; } catch { return double.NaN; } }
 
         private static string FmtTemp(double t) =>
-        t > 0 ? ((int)Math.Round(t) + "°").PadLeft(4) : " -- ";
+        double.IsFinite(t) ? ((int)Math.Round(t) + "°").PadLeft(4) : " N/A";
 
         private static string FmtPow(double p) =>
-        p > 0 ? Math.Round(p, 1).ToString("F1") + "W" : "";
+        double.IsFinite(p) && p >= 0 ? Math.Round(p, 1).ToString("F1") + "W" : "N/A";
 
         // "NVIDIA GeForce RTX 4070 Laptop GPU" -> "RTX 4070", "AMD Radeon RX 6850M XT" -> "RX 6850M"
         private static string ShortGpuName(string? full)
@@ -437,9 +441,16 @@ namespace GHelper.Overlay
             }
 
             HardwareControl.ReadSensorsOverlay();
+            if (AsusACPI.N1xRestricted && _showTemp && overlayThermalZones is not null)
+            {
+                _overlayThrm = GHelper.Fan.OverlayThrmView.Format(overlayThermalZones.Peek());
+                overlayThermalZones.Request();
+            }
+            // Queue-only shared cache: never call synchronous native acquisition on UI.
+            if (AsusACPI.N1xRestricted) _cpuMemoryPow = GHelper.Fan.N1xSharedPowerView.Format(GHelper.Fan.N1xTelemetryReader.Shared.PeekAndRequest());
 
-            // gpuActive gates power, fan and chart history — when the GPU is disabled
-            // its sensors return stale non-zero values, so we zero them out explicitly.
+            // Legacy GPU activity gates usage and disabled-device history. N1X
+            // scoped power remains independent of the temperature provider.
             double gpuTemp = D(HardwareControl.gpuTemp);
             double cpuTemp = D(HardwareControl.cpuTemp);
             bool gpuActive = gpuTemp > 0;
@@ -449,11 +460,13 @@ namespace GHelper.Overlay
             _cpuTempStr = "CPU:" + FmtTemp(cpuTemp) + " ";
             _gpuFanNum = FormatFan(HardwareControl.gpuFanRPM);
             _cpuFanNum = FormatFan(HardwareControl.cpuFanRPM);
-            _gpuPow = HardwareControl.gpuPower is null ? "" : Math.Round(HardwareControl.gpuPower.Value, 1).ToString("F1") + "W";
+            _gpuPow = FmtPow(D(HardwareControl.gpuPower));
             _cpuPow = FmtPow(D(HardwareControl.cpuPower));
 
-            _cpuHistory[_historyHead] = (float)Math.Max(0, D(HardwareControl.cpuPower));
-            _gpuHistory[_historyHead] = gpuActive ? (float)Math.Max(0, D(HardwareControl.gpuPower)) : 0f;
+            // NaN is an absent sample, never measured zero. N1X providers are
+            // independent: failed GPU temperature does not invalidate GPU draw.
+            _cpuHistory[_historyHead] = (float)D(HardwareControl.cpuPower);
+            _gpuHistory[_historyHead] = AsusACPI.N1xRestricted || gpuActive ? (float)D(HardwareControl.gpuPower) : float.NaN;
             _historyHead = (_historyHead + 1) % HistoryLength;
 
             _cpuUsage = HardwareControl.cpuUsage;
@@ -556,6 +569,9 @@ namespace GHelper.Overlay
 
             int innerH = lineH * 2 + lineGap;
             int totalH = padY * 2 + innerH;
+            if (_showCpuMemoryPower) totalH += lineH + lineGap;
+            bool showThrm = AsusACPI.N1xRestricted && _showTemp;
+            if (showThrm) totalH += lineH + lineGap;
 
             bool showFps = _showFps, showTemp = _showTemp, showFans = _showFans, showChart = _showChart;
             bool showPower = _showPower, showUsageMetric = _showUsage, showMem = _showRam, showNames = _showNames;
@@ -608,6 +624,8 @@ namespace GHelper.Overlay
             }
 
             int width = cursor + padX;
+            if (_showCpuMemoryPower) width = Math.Max(width, GHelper.Fan.N1xSharedPowerView.RequiredWidth(_cpuMemoryPow, BaseFontSize, sc, padX));
+            if (showThrm) width = Math.Max(width, GHelper.Fan.N1xSharedPowerView.RequiredWidth(_overlayThrm, BaseFontSize, sc, padX));
 
             if (Size.Width != width || Size.Height != totalH)
                 Size = new Size(width, totalH);
@@ -639,6 +657,8 @@ namespace GHelper.Overlay
             int topY = padY;
             // Nudge per-row text down so it lines up with the vertically centered usage bars.
             int textY = topY + (int)Math.Round(sc);
+            if (_showCpuMemoryPower) g.DrawString(_cpuMemoryPow, font, _cpuBrush, new PointF(padX, textY + 2 * (lineH + lineGap)));
+            if (showThrm) g.DrawString(_overlayThrm, font, _cpuBrush, new PointF(padX, textY + (_showCpuMemoryPower ? 3 : 2) * (lineH + lineGap)));
 
             // FPS
             if (showFps)
@@ -811,38 +831,44 @@ namespace GHelper.Overlay
 
         private void DrawStackedChart(Graphics g, int x, int y, int w, int h, float sc)
         {
+            // Missing series are gaps, not zero. Stack only the available values;
+            // a total line is meaningful only where both scopes were sampled.
             float peak = 10f;
             for (int i = 0; i < HistoryLength; i++)
             {
-                float t = _cpuHistory[i] + _gpuHistory[i];
+                float t = (float.IsFinite(_cpuHistory[i]) ? _cpuHistory[i] : 0) +
+                          (float.IsFinite(_gpuHistory[i]) ? _gpuHistory[i] : 0);
                 if (t > peak) peak = t;
             }
-
             float stepX = (float)w / (HistoryLength - 1);
             int Idx(int i) => (_historyHead + i) % HistoryLength;
-
-            for (int i = 0; i < HistoryLength; i++)
-            {
-                int idx = Idx(i);
-                float px = x + i * stepX;
-                float cpuH = (_cpuHistory[idx] / peak) * h;
-                float gpuH = (_gpuHistory[idx] / peak) * h;
-
-                _basePts[i] = new PointF(px, y + h);
-                _cpuPts[i]  = new PointF(px, y + h - cpuH);
-                _gpuPts[i]  = new PointF(px, y + h - cpuH - gpuH);
-            }
-
             var saved = g.Save();
             g.SetClip(new RectangleF(x, y, w, h));
-
-            FillArea(g, _cpuPts, _basePts, _cpuFillBrush);
-            g.DrawLines(_cpuLinePen, _cpuPts);
-            FillArea(g, _gpuPts, _cpuPts, _gpuFillBrush);
-            g.DrawLines(_gpuLinePen, _gpuPts);
-
-            g.DrawLines(_totalPen!, _gpuPts);
-
+            for (int i = 1; i < HistoryLength; i++)
+            {
+                int a = Idx(i - 1), b = Idx(i);
+                float xa = x + (i - 1) * stepX, xb = x + i * stepX;
+                float ca = _cpuHistory[a], cb = _cpuHistory[b];
+                float ga = _gpuHistory[a], gb = _gpuHistory[b];
+                bool cpu = float.IsFinite(ca) && float.IsFinite(cb);
+                bool gpu = float.IsFinite(ga) && float.IsFinite(gb);
+                void Segment(float va, float vb, float ba, float bb, Pen pen, SolidBrush brush)
+                {
+                    var p = new PointF(xa, y + h - va / peak * h);
+                    var q = new PointF(xb, y + h - vb / peak * h);
+                    g.FillPolygon(brush, new[] { p, q, new PointF(xb, y + h - bb / peak * h), new PointF(xa, y + h - ba / peak * h) });
+                    g.DrawLine(pen, p, q);
+                }
+                if (cpu) Segment(ca, cb, 0, 0, _cpuLinePen, _cpuFillBrush);
+                // Do not join a GPU segment across a change of stacking scope.
+                bool sameBase = float.IsFinite(ca) == float.IsFinite(cb);
+                if (gpu && sameBase)
+                {
+                    float ba = cpu ? ca : 0, bb = cpu ? cb : 0;
+                    Segment(ba + ga, bb + gb, ba, bb, _gpuLinePen, _gpuFillBrush);
+                    if (cpu) g.DrawLine(_totalPen!, xa, y + h - (ca + ga) / peak * h, xb, y + h - (cb + gb) / peak * h);
+                }
+            }
             g.Restore(saved);
             g.DrawLine(_axPen!, x, y + h, x + w, y + h);
         }
@@ -1005,6 +1031,7 @@ namespace GHelper.Overlay
             _showFans  = BlockShown("overlay_show_fans", m);
             _showChart = BlockShown("overlay_show_chart", m);
             _showPower = BlockShown("overlay_show_power", m);
+            _showCpuMemoryPower = AsusACPI.N1xRestricted && AppConfig.Get(ModeKey("overlay_show_cpu_memory_power", m), 1) != 0;
             _showUsage = BlockShown("overlay_show_usage", m);
             _showRam   = BlockShown("overlay_show_ram", m);
             _showNames = BlockShown("overlay_names", m);
@@ -1059,8 +1086,11 @@ namespace GHelper.Overlay
             Location = new Point(x, y);
         }
 
+
+
         public void StartOverlay()
         {
+            if (AsusACPI.N1xRestricted) overlayThermalZones = GHelper.Fan.ThermalZoneReader.Shared;
             _active = true;
             _lastFgPid = 0;
             _gameOnly = AppConfig.IsOverlayGameOnly();
@@ -1102,6 +1132,7 @@ namespace GHelper.Overlay
 
         public void StopOverlay()
         {
+            overlayThermalZones = null;
             _active = false;
             if (_fgHook != IntPtr.Zero) { UnhookWinEvent(_fgHook); _fgHook = IntPtr.Zero; }
             _fgHookProc = null;

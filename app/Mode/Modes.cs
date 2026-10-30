@@ -37,18 +37,36 @@
 
         const int maxModes = 20;
 
+        // Built-in Manual mode (ProArt 4th operating mode). Slot 20 is outside the custom range 3..19.
+        public const int ManualSlot = 20;
+        public const int WindowsSlot = 21;
+        public static bool IsCustom(int mode) => mode >= 3 && mode < maxModes;
+        public static int GetCustomSlot()
+        {
+            int remembered = AppConfig.Get("last_custom_mode");
+            if (IsCustom(remembered) && Exists(remembered)) return remembered;
+            for (int i = 3; i < maxModes; i++) if (Exists(i)) return i;
+            // Create a genuine, editable GHelper custom profile, not the firmware Manual mode.
+            AppConfig.Set("mode_base_3", AsusACPI.PerformanceBalanced);
+            AppConfig.Set("mode_name_3", "커스텀");
+            return 3;
+        }
+
         public static Dictionary<int, string> GetDictonary()
         {
             Dictionary<int, string> modes = new Dictionary<int, string>
             {
-              {2, Properties.Strings.Silent},
-              {0, Properties.Strings.Balanced},
-              {1, Properties.Strings.Turbo}
+              {WindowsSlot, GetName(WindowsSlot)},
+              {2, GetName(2)},
+              {0, GetName(0)},
+              {1, GetName(1)},
+              {ManualSlot, GetName(ManualSlot)},
+              {GetCustomSlot(), GetName(GetCustomSlot())}
             };
 
             for (int i = 3; i < maxModes; i++)
             {
-                if (Exists(i)) modes.Add(i, GetName(i));
+                if (Exists(i) && !modes.ContainsKey(i)) modes.Add(i, GetName(i));
             }
 
             return modes;
@@ -56,13 +74,7 @@
 
         public static List<int> GetList()
         {
-            List<int> modes = new() { 2, 0, 1 };
-            for (int i = 3; i < maxModes; i++)
-            {
-                if (Exists(i)) modes.Add(i);
-            }
-
-            return modes;
+            return new List<int> { WindowsSlot, 2, 0, 1, ManualSlot, GetCustomSlot() };
         }
 
         public static void Remove(int mode)
@@ -71,6 +83,8 @@
             {
                 AppConfig.Remove(clean + "_" + mode);
             }
+            // This association is deliberately not cloned by Add(): new custom modes default to unchanged.
+            AppConfig.Remove("windows_power_mode_" + mode);
         }
 
         public static int Add()
@@ -133,13 +147,14 @@
 
         public static bool IsCurrentCustom()
         {
-            return GetCurrent() > 2;
+            return IsCustom(GetCurrent());
         }
 
         public static void SetCurrent(int mode)
         {
             AppConfig.Set("performance_" + Program.PerformanceKey(), mode);
             AppConfig.Set("performance_mode", mode);
+            if (IsCustom(mode)) AppConfig.Set("last_custom_mode", mode);
         }
 
         public static int GetCurrentBase()
@@ -159,6 +174,9 @@
 
         public static int GetBase(int mode)
         {
+            if (mode == WindowsSlot) return AsusACPI.PerformanceBalanced;
+            if (mode == ManualSlot)
+                return AsusACPI.PerformanceManual;
             if (mode >= 0 && mode <= 2)
                 return mode;
             else
@@ -169,12 +187,15 @@
         {
             switch (mode)
             {
+                case WindowsSlot: return "Windows(윈도우)";
+                case ManualSlot:
+                    return "수동";
                 case 0:
-                    return Properties.Strings.Balanced;
+                    return "표준";
                 case 1:
-                    return Properties.Strings.Turbo;
+                    return "성능";
                 case 2:
-                    return Properties.Strings.Silent;
+                    return "저소음";
                 default:
                     return AppConfig.GetString("mode_name_" + mode);
             }

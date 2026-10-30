@@ -50,7 +50,7 @@ public static class AsusHid
             {
                 try
                 {
-                    if ((pids != null ? pids.Contains(device.ProductID) : ALL_PIDS.Contains(device.ProductID)) &&
+                    if ((pids != null ? pids.Contains(device.ProductID) : (ALL_PIDS.Contains(device.ProductID) || reportId == INPUT_ID)) &&
                         device.CanOpen &&
                         device.GetMaxFeatureReportLength() > 0)
                     {
@@ -63,7 +63,7 @@ public static class AsusHid
                 }
             }
 
-            deviceList = filteredDevices;
+            deviceList = reportId == INPUT_ID ? filteredDevices.OrderBy(d => d.ProductID == 0x4B42 ? 0 : 1) : filteredDevices;
         }
         catch (Exception ex)
         {
@@ -127,7 +127,7 @@ public static class AsusHid
     public static void WriteInput(byte[] data, string? log = "USB")
     {
         lock (hidLock)
-        foreach (var device in FindDevices(INPUT_ID))
+        foreach (var device in FindDevices(INPUT_ID).Take(1))
         {
             try
             {

@@ -4,6 +4,7 @@ namespace GHelper.Fan
 {
     public class FanSensorControl
     {
+        private static bool N1xRestricted => AsusACPI.N1xRestricted;
         public const int DEFAULT_FAN_MIN = 18;
         public const int DEFAULT_FAN_MAX = 58;
 
@@ -124,6 +125,7 @@ namespace GHelper.Fan
 
         public static string FormatFan(AsusFan device, int value)
         {
+            if (N1xRestricted) return N1xFanPowerPolicy.FormatFan(value);
             if (value < 0) return null;
 
             if (value > GetFanMax(device) && value <= INADEQUATE_MAX) SetFanMax(device, value);
@@ -136,6 +138,7 @@ namespace GHelper.Fan
 
         public void StartCalibration()
         {
+            if (N1xRestricted) return; // Calibration changes thermal mode before writing a curve.
 
             measuredMax = new int[] { 0, 0, 0 };
             timer.Enabled = true;

@@ -13,6 +13,10 @@ namespace GHelper
         public OverlayConfig()
         {
             InitializeComponent();
+            // Independent display switch; existing CPU/GPU-only power settings are unchanged.
+            var checkSharedPower = new RCheckBox { Text = "CPU+Memory (W) — read-only shared, not CPU-only", AutoSize = true, Dock = DockStyle.Bottom, Visible = AsusACPI.N1xRestricted };
+            Controls.Add(checkSharedPower);
+            Height += AsusACPI.N1xRestricted ? 36 : 0;
             InitTheme(true);
 
             Text = Properties.Strings.Overlay;
@@ -23,6 +27,13 @@ namespace GHelper
             buttonFull.Text = Properties.Strings.OverlayModeFull;
             buttonComplete.Text = Properties.Strings.OverlayModeComplete;
             checkTemp.Text = Properties.Strings.OverlayTemperatures;
+            if (AsusACPI.N1xRestricted)
+            {
+                const string hint = "THRM (임시): ACPI/WMI thermal zone. CPU die location unverified; firmware value may be cached or a fallback. Physical freshness unknown. Not for control.";
+                checkTemp.AccessibleDescription = hint;
+                var thermalTip = new ToolTip(components) { AutoPopDelay = 30000, InitialDelay = 400, ReshowDelay = 100 };
+                thermalTip.SetToolTip(checkTemp, hint);
+            }
             checkFans.Text = Properties.Strings.FanSpeed;
             checkChart.Text = Properties.Strings.OverlayChart;
             checkPower.Text = Properties.Strings.Power;
@@ -44,6 +55,7 @@ namespace GHelper
                 (checkFans, "overlay_show_fans"),
                 (checkChart, "overlay_show_chart"),
                 (checkPower, "overlay_show_power"),
+                (checkSharedPower, "overlay_show_cpu_memory_power"),
                 (checkUsage, "overlay_show_usage"),
                 (checkRam, "overlay_show_ram"),
                 (checkLabels, "overlay_names"),

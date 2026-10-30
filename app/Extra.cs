@@ -21,6 +21,8 @@ namespace GHelper
         int coresMinE = AsusACPI.ECoreMin;
 
         const string EMPTY = "--------------";
+        private RComboBox? comboCopilot, comboFnCopilot;
+        private RTextBox? textCopilot, textFnCopilot;
 
 
         private void SetKeyCombo(ComboBox combo, TextBox txbox, string name)
@@ -39,6 +41,7 @@ namespace GHelper
               {"play", Properties.Strings.PlayPause},
               {"aura", Properties.Strings.ToggleAura},
               {"performance", Properties.Strings.PerformanceMode},
+              {"menu", "Menu (context menu)"},
               {"screen", Properties.Strings.ToggleScreen},
               {"lock", Properties.Strings.LockScreen},
               {"miniled", Properties.Strings.ToggleMiniled},
@@ -95,6 +98,14 @@ namespace GHelper
                     customActions[""] = Properties.Strings.ToggleFnLock;
                     customActions.Remove("fnlock");
                     break;
+                case "copilot":
+                    customActions[""] = "Menu (context menu)";
+                    customActions.Remove("menu");
+                    break;
+                case "fncopilot":
+                    customActions[""] = Properties.Strings.PerformanceMode;
+                    customActions.Remove("performance");
+                    break;
                 case "fnv":
                     customActions[""] = Properties.Strings.VisualMode;
                     customActions.Remove("visual");
@@ -143,6 +154,7 @@ namespace GHelper
         public Extra()
         {
             InitializeComponent();
+            InitDiagnostics();
 
             labelBindings.Text = Properties.Strings.KeyBindings;
             buttonResetBindings.Text = Properties.Strings.Reset;
@@ -325,6 +337,8 @@ namespace GHelper
             }
 
 
+            if (AppConfig.IsVivoZenPro()) InitFiveKeyBindings();
+
             InitTheme();
             Shown += Keyboard_Shown;
 
@@ -475,6 +489,7 @@ namespace GHelper
 
             pictureHelp.Click += PictureHelp_Click;
             buttonResetBindings.Click += ButtonResetBindings_Click;
+            InitServiceActionButtons();
             buttonServices.Click += ButtonServices_Click;
 
             pictureLog.Click += PictureLog_Click;
@@ -639,7 +654,7 @@ namespace GHelper
         private void InitVramMem()
         {
             int unitMb = 0;
-            if (PawnIO.CpuInfo.IsAMD) vramOptions = Program.acpi.GetVramOptions(out unitMb);
+            vramOptions = Program.acpi.GetVramOptions(out unitMb); // read-only ACPI query; was gated to AMD CPUs
 
             if (vramOptions.Length > 0)
             {
@@ -648,9 +663,10 @@ namespace GHelper
                     comboAPU.Items.Add(option == 0 ? Properties.Strings.AutoMode : ((double)option * unitMb / 1024).ToString("0.#") + "G");
 
                 int current = Program.acpi.GetVramMem();
-                if (current == 0) current = AppConfig.Get("vram_mem", 0);
-
-                comboAPU.SelectedIndex = Math.Max(0, Array.IndexOf(vramOptions, current));
+                // Zero is the firmware's Auto selection, not a failed read. A saved
+                // request is not evidence of the configured or active GPU allocation.
+                comboAPU.SelectedIndex = Array.IndexOf(vramOptions, current);
+                toolTip.SetToolTip(comboAPU, VramElevation.SelectionHint);
             }
             else if (IntelVram.Init())
             {
@@ -675,9 +691,13 @@ namespace GHelper
             comboAPU.SelectedIndexChanged += ComboAPU_SelectedIndexChanged;
         }
 
-        private void ComboAPU_SelectedIndexChanged(object? sender, EventArgs e)
+        private bool vramApplyBusy;
+
+        private async void ComboAPU_SelectedIndexChanged(object? sender, EventArgs e)
         {
+            if (vramApplyBusy) return;
             int mem = comboAPU.SelectedIndex;
+            if (mem < 0) return;
 
             if (IntelVram.Supported && !ProcessHelper.IsUserAdministrator())
             {
@@ -685,20 +705,62 @@ namespace GHelper
                 return;
             }
 
+            bool uefi = false;
             if (IntelVram.Supported) IntelVram.SetIndex(mem);
             else if (vramOptions.Length == 0) Program.acpi.SetAPUMem(mem);
             else
             {
-                Program.acpi.SetVramMem(vramOptions[mem]);
-                AppConfig.Set("vram_mem", vramOptions[mem]);
+                if (mem >= vramOptions.Length) return;
+                vramApplyBusy = true;
+                comboAPU.Enabled = false;
+                bool success = false;
+                string error = "";
+                try
+                {
+                    int raw = vramOptions[mem];
+                    if (Program.acpi.TryGetVramTransport(raw, out uefi, out error))
+                    {
+                        if (uefi && !ProcessHelper.IsUserAdministrator())
+                            (success, error) = await VramElevation.ApplyAsync(raw);
+                        else
+                            success = uefi ? Program.acpi.SetUefiVramMem(raw, out error) : Program.acpi.SetVramMem(raw, out error);
+                    }
+                    if (!success)
+                    {
+                        if (!string.IsNullOrEmpty(error))
+                            MessageBox.Show(error + (VramElevation.Korean
+                                ? "\n\n할당량은 확인되지 않았습니다. 설정 기록이나 재시작 요청을 하지 않습니다."
+                                : "\n\nGPU allocation is unverified. No configuration record or reboot request will be made."),
+                                VramElevation.ErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        comboAPU.SelectedIndex = Array.IndexOf(vramOptions, Program.acpi.GetVramMem());
+                        return;
+                    }
+                    // A verified persisted request is NOT an effective GPU allocation.
+                    AppConfig.Set("vram_mem_requested", raw);
+                    if (uefi)
+                    {
+                        toolTip.SetToolTip(comboAPU, VramElevation.PendingText);
+                        Logger.WriteLine($"VRAM UI pending raw={raw}; stored/readback verified; active allocation unverified");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.WriteLine("VRAM apply exception: " + ex);
+                    MessageBox.Show(ex.Message, VramElevation.ErrorTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    comboAPU.SelectedIndex = Array.IndexOf(vramOptions, Program.acpi.GetVramMem());
+                    return;
+                }
+                finally
+                {
+                    comboAPU.Enabled = true;
+                    vramApplyBusy = false;
+                }
             }
 
-            DialogResult dialogResult = MessageBox.Show(Properties.Strings.AlertAPUMemoryRestart, Properties.Strings.AlertAPUMemoryRestartTitle, MessageBoxButtons.YesNo);
+            DialogResult dialogResult = MessageBox.Show(uefi ? VramElevation.PendingText : Properties.Strings.AlertAPUMemoryRestart,
+                uefi ? VramElevation.PendingTitle : Properties.Strings.AlertAPUMemoryRestartTitle, MessageBoxButtons.YesNo);
             if (dialogResult == DialogResult.Yes)
-            {
                 Process.Start("shutdown", "/r /t 1");
-            }
-
         }
 
         private void CheckBootSound_CheckedChanged(object? sender, EventArgs e)
@@ -766,7 +828,7 @@ namespace GHelper
 
         private void InitServices()
         {
-            buttonServices.Enabled = false;
+            buttonServices.Enabled = buttonStartServices.Enabled = false;
             Task.Run(() =>
             {
                 int servicesCount = AsusService.GetRunningCount();
@@ -776,60 +838,15 @@ namespace GHelper
 
         private void VisualiseServices(int servicesCount)
         {
-            if (servicesCount > 0)
-            {
-                buttonServices.Text = Properties.Strings.Stop;
-                labelServices.ForeColor = colorTurbo;
-            }
-            else
-            {
-                buttonServices.Text = Properties.Strings.Start;
-                labelServices.ForeColor = colorStandard;
-            }
-
-            labelServices.Text = Properties.Strings.AsusServicesRunning + ":  " + servicesCount;
-            buttonServices.Enabled = true;
-
+            RefreshServiceOptions();
+            labelServices.ForeColor = servicesCount > 0 ? colorTurbo : colorStandard;
+            labelServices.Text = Properties.Strings.AsusServicesRunning + ": " + servicesCount + " (체크 = 작업 대상)";
+            buttonServices.Text = "중지";
+            buttonStartServices.Text = "시작";
+            buttonServices.Enabled = buttonStartServices.Enabled = !serviceActionBusy;
         }
 
-        public void ServiesToggle()
-        {
-            buttonServices.Enabled = false;
-
-            if (AsusService.GetRunningCount() > 0)
-            {
-                labelServices.Text = Properties.Strings.StoppingServices + " ...";
-                Task.Run(() =>
-                {
-                    AsusService.StopAsusServices();
-                    Program.inputDispatcher.Init();
-                    BeginInvoke(delegate
-                    {
-                        InitServices();
-                    });
-                });
-            }
-            else
-            {
-                labelServices.Text = Properties.Strings.StartingServices + " ...";
-                Task.Run(() =>
-                {
-                    AsusService.StartAsusServices();
-                    BeginInvoke(delegate
-                    {
-                        InitServices();
-                    });
-                });
-            }
-        }
-
-        private void ButtonServices_Click(object? sender, EventArgs e)
-        {
-            if (ProcessHelper.IsUserAdministrator())
-                ServiesToggle();
-            else
-                ProcessHelper.RunAsAdmin("services");
-        }
+        private void ButtonServices_Click(object? sender, EventArgs e) => RequestServiceAction(false);
 
         private void CheckGpuApps_CheckedChanged(object? sender, EventArgs e)
         {
@@ -865,6 +882,25 @@ namespace GHelper
             Process.Start(new ProcessStartInfo("https://github.com/seerge/g-helper/wiki/Power-user-settings#custom-hotkey-actions") { UseShellExecute = true });
         }
 
+        private void InitFiveKeyBindings()
+        {
+            comboCopilot = new RComboBox { Name = "comboCopilot", AccessibleName = "Copilot Action", Margin = comboFNC.Margin };
+            comboFnCopilot = new RComboBox { Name = "comboFnCopilot", AccessibleName = "Fn+Copilot Action", Margin = comboFNC.Margin };
+            textCopilot = new RTextBox { Name = "textCopilot", PlaceholderText = "action", Margin = textFNC.Margin };
+            textFnCopilot = new RTextBox { Name = "textFnCopilot", PlaceholderText = "action", Margin = textFNC.Margin };
+            Label MakeLabel(string text) => new Label { Text = text, AutoSize = true, Padding = labelFNC.Padding, Margin = labelFNC.Margin };
+            SetKeyCombo(comboCopilot, textCopilot, "copilot");
+            SetKeyCombo(comboFnCopilot, textFnCopilot, "fncopilot");
+            FiveKeyLayout.Apply(tableBindings, new Control[][]
+            {
+                new Control[] { labelM4, comboM4, textM4 },
+                new Control[] { labelFNC, comboFNC, textFNC },
+                new Control[] { labelFNV, comboFNV, textFNV },
+                new Control[] { MakeLabel("Copilot:"), comboCopilot, textCopilot },
+                new Control[] { MakeLabel("Fn+Copilot:"), comboFnCopilot, textFnCopilot }
+            });
+        }
+
         private void ButtonResetBindings_Click(object? sender, EventArgs e)
         {
             comboM1.SelectedValue = "";
@@ -874,6 +910,13 @@ namespace GHelper
             comboM5.SelectedValue = "";
 
             textM1.Text = textM2.Text = textM3.Text = textM4.Text = textM5.Text = "";
+            comboFNC.SelectedValue = comboFNV.SelectedValue = "";
+            textFNC.Text = textFNV.Text = "";
+            if (comboCopilot is not null && comboFnCopilot is not null)
+            {
+                comboCopilot.SelectedValue = comboFnCopilot.SelectedValue = "";
+                textCopilot!.Text = textFnCopilot!.Text = "";
+            }
 
             MKeyControl.Reset();
             Program.inputDispatcher.RegisterKeys();
@@ -957,7 +1000,71 @@ namespace GHelper
             }
 
             Left = Program.settingsForm.Left - Width - 5;
+            InitServiceOptions();
             InitServices();
+        }
+
+        private Panel? serviceOptionsPanel;
+        private readonly List<CheckBox> serviceOptionChecks = new();
+        private int serviceBaseHeight;
+
+        // Shows each optional service with its current state (실행 중 / 중지됨)
+        private void RefreshServiceOptions()
+        {
+            foreach (var cb in serviceOptionChecks)
+            {
+                string name = (string)cb.Tag!;
+                cb.Text = name + "  —  " + AsusService.StateText(name);
+            }
+        }
+
+        // Per-item on/off for the services stop list (stop = checked). Stored in AppConfig "svc_<name>".
+        // Collapsed by default; clicking the header label toggles it. Stop/Start button stays visible.
+        private void InitServiceOptions()
+        {
+            if (serviceOptionsPanel != null) return;
+
+            serviceBaseHeight = panelServices.Height;
+            serviceOptionsPanel = new Panel
+            {
+                Location = new Point(0, serviceBaseHeight),
+                Width = panelServices.Width,
+                Visible = false,
+                BackColor = panelServices.BackColor,
+            };
+
+            int y = 4;
+            foreach (string name in AsusService.OptionalNames)
+            {
+                var cb = new CheckBox
+                {
+                    Text = name,
+                    AutoSize = true,
+                    Checked = AsusService.IsEnabled(name),
+                    Location = new Point(15, y),
+                    ForeColor = labelServices.ForeColor,
+                };
+                string key = "svc_" + name;
+                cb.CheckedChanged += (s, e) => AppConfig.Set(key, cb.Checked ? 1 : 0);
+                cb.Tag = name;
+                serviceOptionChecks.Add(cb);
+                serviceOptionsPanel.Controls.Add(cb);
+                y += cb.Height + 2;
+            }
+            serviceOptionsPanel.Height = y + 6;
+            panelServices.Controls.Add(serviceOptionsPanel);
+
+            labelServices.Cursor = Cursors.Hand;
+            labelServices.Click += (s, e) => ToggleServiceOptions();
+        }
+
+        private void ToggleServiceOptions()
+        {
+            if (serviceOptionsPanel is null) return;
+            RefreshServiceOptions();
+            bool open = !serviceOptionsPanel.Visible;
+            serviceOptionsPanel.Visible = open;
+            panelServices.Height = serviceBaseHeight + (open ? serviceOptionsPanel.Height : 0);
         }
 
 

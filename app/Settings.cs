@@ -1,4 +1,4 @@
-﻿using GHelper.Ally;
+using GHelper.Ally;
 using GHelper.AnimeMatrix;
 using GHelper.AutoUpdate;
 using GHelper.Battery;
@@ -39,6 +39,7 @@ namespace GHelper
         public static System.Timers.Timer sensorTimer = default!;
         private static readonly bool sensorsAlways = AppConfig.Is("sensors_always");
         private readonly System.Windows.Forms.Timer batteryTimer = new() { Interval = 200 };
+        private readonly ThermalZoneReader mainThermalZones = ThermalZoneReader.Shared;
 
         public Matrix? matrixForm;
         public Slash? slashForm;
@@ -48,7 +49,9 @@ namespace GHelper
         public Handheld? handheldForm;
         public OverlayConfig? overlayForm;
 
+        private NpuClockMain? npuClockMain;
         static long lastRefresh;
+        private readonly Label labelCpuMemoryPower = new() { Name = "labelCpuMemoryPower", Text = "CPU+Memory (W): N/A\nGPU draw: N/A · GPU voltage: N/A", Dock = DockStyle.Top, Height = 64, Font = new Font("Segoe UI", 8.25F), TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(12, 0, 0, 0) };
         static long lastBatteryRefresh;
         static long lastLostFocus;
 
@@ -64,17 +67,37 @@ namespace GHelper
         {
 
             InitializeComponent();
+
+            InitSixModes();
+            InitWindowsPowerSelector();
+            InitWindowsPlanSelector();
+            if (AsusACPI.N1xRestricted)
+            {
+                Controls.Add(labelCpuMemoryPower);
+                Controls.SetChildIndex(labelCpuMemoryPower, Controls.GetChildIndex(panelPerformance));
+                var npuReader = new NpuClockReader();
+                npuClockMain = new NpuClockMain(this, npuReader.ReadAsync);
+                Controls.Add(npuClockMain.Label);
+                Controls.SetChildIndex(npuClockMain.Label, Controls.GetChildIndex(panelPerformance));
+                // Reuse 32 px of existing section whitespace for the second scoped line;
+                // keep the outer-window increase identical to the one-line release.
+                panelPerformance.Padding = new Padding(20, 20, 20, 4);
+                panelGPU.Padding = new Padding(20, 4, 20, 0);
+                Height += 32;
+            }
             InitTheme(true);
+            MainViewportLayout.Configure(this, labelVersion, AsusACPI.N1xRestricted);
 
             gpuControl = new GPUModeControl(this);
             updateControl = new AutoUpdateControl(this);
             matrixControl = new AniMatrixControl(this);
             allyControl = new AllyControl(this);
 
-            buttonSilent.Text = Properties.Strings.Silent;
-            buttonBalanced.Text = Properties.Strings.Balanced;
-            buttonTurbo.Text = Properties.Strings.Turbo;
+            buttonSilent.Text = Modes.GetName(2);
+            buttonBalanced.Text = Modes.GetName(0);
+            buttonTurbo.Text = Modes.GetName(1);
             buttonFans.Text = Properties.Strings.FansPower;
+            buttonManual.Text = Modes.GetName(Modes.ManualSlot);
 
             buttonEco.Text = Properties.Strings.EcoMode;
             buttonUltimate.Text = Properties.Strings.UltimateMode;
@@ -113,9 +136,10 @@ namespace GHelper
             buttonQuit.AccessibleName = Properties.Strings.Quit;
             buttonUpdates.AccessibleName = Properties.Strings.BiosAndDriverUpdates;
             panelPerformance.AccessibleName = Properties.Strings.PerformanceMode;
-            buttonSilent.AccessibleName = Properties.Strings.Silent;
-            buttonBalanced.AccessibleName = Properties.Strings.Balanced;
-            buttonTurbo.AccessibleName = Properties.Strings.Turbo;
+            buttonSilent.AccessibleName = buttonSilent.Text;
+            buttonBalanced.AccessibleName = buttonBalanced.Text;
+            buttonTurbo.AccessibleName = buttonTurbo.Text;
+            buttonManual.AccessibleName = buttonManual.Text;
             buttonFans.AccessibleName = Properties.Strings.FansAndPower;
             panelGPU.AccessibleName = Properties.Strings.GPUMode;
             buttonEco.AccessibleName = Properties.Strings.EcoMode;
@@ -139,6 +163,7 @@ namespace GHelper
             buttonSilent.BorderColor = colorEco;
             buttonBalanced.BorderColor = colorStandard;
             buttonTurbo.BorderColor = colorTurbo;
+            buttonManual.BorderColor = Color.Orange;
             buttonFans.BorderColor = colorCustom;
 
             buttonEco.BorderColor = colorEco;
@@ -167,6 +192,7 @@ namespace GHelper
             buttonSilent.Click += ButtonSilent_Click;
             buttonBalanced.Click += ButtonBalanced_Click;
             buttonTurbo.Click += ButtonTurbo_Click;
+            buttonManual.Click += ButtonManual_Click;
 
             buttonEco.Click += ButtonEco_Click;
             buttonStandard.Click += ButtonStandard_Click;
@@ -285,7 +311,7 @@ namespace GHelper
             buttonAutoTDP.Click += ButtonAutoTDP_Click;
             buttonAutoTDP.BorderColor = colorTurbo;
 
-            Text = "G-Helper " + (ProcessHelper.IsUserAdministrator() ? "—" : "-") + " " + AppConfig.GetModelShort();
+            Text = AppBuildInfo.WindowTitle(AppConfig.GetModelShort(), ProcessHelper.IsUserAdministrator());
             TopMost = AppConfig.Is("topmost");
 
             //This will auto position the window again when it resizes. Might mess with position if people drag the window somewhere else.
@@ -966,12 +992,12 @@ namespace GHelper
             if (InvokeRequired)
                 Invoke(delegate
                 {
-                    labelVersion.Text = label;
+                    labelVersion.Text = AppBuildInfo.VersionLabel(label);
                     if (update) labelVersion.ForeColor = colorTurbo;
                 });
             else
             {
-                labelVersion.Text = label;
+                labelVersion.Text = AppBuildInfo.VersionLabel(label);
                 if (update) labelVersion.ForeColor = colorTurbo;
             }
         }
@@ -1652,11 +1678,38 @@ namespace GHelper
             string battery = "";
             string charge = "";
 
-            await Task.Run(() => HardwareControl.ReadSensors());
+            // Clear expired shared display before awaiting a potentially blocked worker.
+            // Peek only queues acquisition; no native calls occur on the UI thread.
+            if (AsusACPI.N1xRestricted && IsHandleCreated)
+            {
+                mainThermalZones.Request(); // queues the WMI query; never run it on the UI thread
+                BeginInvoke(delegate {
+                    if (IsDisposed || Disposing) return;
+                    npuClockMain?.Refresh();
+                    labelCPUFan.Text = MainThrmView.WithFan(MainThrmView.Format(HardwareControl.cpuTemp > 0 ? (double?)HardwareControl.cpuTemp : null, mainThermalZones.Peek()), HardwareControl.cpuFan);
+                    labelCPUFan.AccessibleDescription = MainThrmView.Warning;
+                    labelCpuMemoryPower.Text = N1xSharedPowerView.FormatMain(N1xTelemetryReader.Shared.PeekAndRequest());
+                });
+            }
+
+            await Task.Run(async () =>
+            {
+                // Await the queued producer before the main/tray snapshot is consumed.
+                // A queue-only peek at this 2 s cadence otherwise renders N/A on expiry
+                // and never observes the successful completion until the next tick.
+                if (AsusACPI.N1xRestricted)
+                {
+                    try { await N1xTelemetryReader.Shared.RequestAsync().WaitAsync(TimeSpan.FromSeconds(1)); }
+                    catch (TimeoutException) { } // queued call stays single-flight; expired getters show N/A
+                }
+                HardwareControl.ReadSensors();
+            });
             if (Visible) _ = Task.Run((Action)PeripheralsProvider.RefreshBatteryForAllDevices);
 
             if (HardwareControl.cpuTemp > 0)
                 cpuTemp = ": " + TempHelper.FormatTemp((double)HardwareControl.cpuTemp);
+            else if (AsusACPI.N1xRestricted) cpuTemp = ": N/A";
+            if (AsusACPI.N1xRestricted && HardwareControl.gpuTemp is null) gpuTemp = ": N/A";
 
             if (HardwareControl.batteryCapacity > 0)
             {
@@ -1685,8 +1738,11 @@ namespace GHelper
             if (Program.settingsForm.IsHandleCreated)
                 Program.settingsForm.BeginInvoke(delegate
                 {
-                    labelCPUFan.Text = "CPU" + cpuTemp + "  " + cpuFan;
+                    labelCPUFan.Text = AsusACPI.N1xRestricted
+                        ? MainThrmView.WithFan(MainThrmView.Format(HardwareControl.cpuTemp > 0 ? (double?)HardwareControl.cpuTemp : null, mainThermalZones.Peek()), HardwareControl.cpuFan)
+                        : "CPU" + cpuTemp + "  " + cpuFan;
                     labelGPUFan.Text = "GPU" + gpuTemp + "  " + gpuFan;
+                    if (AsusACPI.N1xRestricted) labelCpuMemoryPower.Text = N1xSharedPowerView.FormatMain(N1xTelemetryReader.Shared.PeekAndRequest());
 
                     if (HardwareControl.gpuFan is not null && AppConfig.NoGpu())
                         labelMidFan.Text = "GPU" + gpuTemp + " " + gpuFan;
@@ -1698,7 +1754,7 @@ namespace GHelper
                     if (!batteryMouseOver && !batteryFullMouseOver) labelCharge.Text = charge;
                 });
 
-            if (Program.trayIcon is not null) Program.trayIcon.Text = trayTip;
+            if (Program.trayIcon is not null) Program.trayIcon.Text = AppBuildInfo.TrayText(trayTip);
         }
 
         public void LabelFansResult(string text)
@@ -1738,54 +1794,11 @@ namespace GHelper
 
         public void ShowMode(int mode)
         {
-            if (InvokeRequired)
-                Invoke(delegate
-                {
-                    VisualiseMode(mode);
-                });
-            else
-                VisualiseMode(mode);
+            if (InvokeRequired) { Invoke(() => ShowMode(mode)); return; }
+            VisualiseMode(mode);
+            RefreshWindowsPowerSelector(mode);
+            RefreshWindowsPlanSelector(mode);
         }
-
-        protected void VisualiseMode(int mode)
-        {
-            buttonSilent.Activated = false;
-            buttonBalanced.Activated = false;
-            buttonTurbo.Activated = false;
-            buttonFans.Activated = false;
-
-            switch (mode)
-            {
-                case AsusACPI.PerformanceSilent:
-                    buttonSilent.Activated = true;
-                    break;
-                case AsusACPI.PerformanceTurbo:
-                    buttonTurbo.Activated = true;
-                    break;
-                case AsusACPI.PerformanceBalanced:
-                    buttonBalanced.Activated = true;
-                    break;
-                default:
-                    buttonFans.Activated = true;
-                    buttonFans.BorderColor = Modes.GetBase(mode) switch
-                    {
-                        AsusACPI.PerformanceSilent => colorEco,
-                        AsusACPI.PerformanceTurbo => colorTurbo,
-                        AsusACPI.PerformanceFullSpeed => Color.Orange,
-                        _ => colorStandard,
-                    };
-                    break;
-            }
-
-            foreach (var item in contextMenuStrip.Items)
-            {
-                if (item is ToolStripMenuItem menuItem && menuItem.Tag is not null)
-                {
-                    menuItem.Checked = ((int)menuItem.Tag == mode);
-                }
-            }
-        }
-
 
         public void SetModeLabel(string modeText)
         {
@@ -2035,6 +2048,11 @@ namespace GHelper
         private void ButtonTurbo_Click(object? sender, EventArgs e)
         {
             Program.modeControl.SetPerformanceMode(AsusACPI.PerformanceTurbo);
+        }
+
+        private void ButtonManual_Click(object? sender, EventArgs e)
+        {
+            Program.modeControl.SetPerformanceMode(Modes.ManualSlot);
         }
 
 

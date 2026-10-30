@@ -44,6 +44,7 @@ namespace GHelper.Input
 
         KeyboardListener listener;
         KeyboardHook hook = new KeyboardHook();
+        private CopilotKeyboardHook? copilotHook;
 
         public InputDispatcher()
         {
@@ -52,7 +53,20 @@ namespace GHelper.Input
             Debug.WriteLine($"Init: {BitConverter.ToString(result)}");
 
             Program.acpi.SubscribeToEvents(WatcherEventArrived);
-            //Task.Run(Program.acpi.RunListener);
+            // ATK listener deliberately disabled: unverified ARM64 handle/lifetime safety.
+
+            if (AppConfig.IsVivoZenPro())
+            {
+                try
+                {
+                    copilotHook = new CopilotKeyboardHook(Program.settingsForm, KeyProcess);
+                    Application.ApplicationExit += (_, _) => copilotHook?.Dispose();
+                }
+                catch (System.ComponentModel.Win32Exception ex)
+                {
+                    Logger.WriteLine("Copilot keyboard hook unavailable: " + ex.Message);
+                }
+            }
 
             hook.KeyPressed += new EventHandler<KeyPressedEventArgs>(KeyPressed);
 
@@ -159,6 +173,7 @@ namespace GHelper.Input
             }
 
             if (keyApp != Keys.None) hook.RegisterHotKey(keyModifier, keyApp);
+
 
             if (!AppConfig.Is("skip_hotkeys"))
             {
@@ -336,6 +351,7 @@ namespace GHelper.Input
         {
 
             Logger.WriteLine(e.Key.ToString() + " " + e.Modifier.ToString());
+
 
             if (e.Modifier == (ModifierKeys.Control | ModifierKeys.Shift | ModifierKeys.Alt)
                 && e.Key >= Keys.F1 && e.Key < Keys.F1 + AsusKeyboard.LaunchSlots)
@@ -605,7 +621,7 @@ namespace GHelper.Input
                 return;
             }
 
-            string action = AppConfig.GetString(name);
+            string action = CopilotBindings.Resolve(name, AppConfig.GetString(name));
 
             if (action is null || action.Length <= 1)
             {
@@ -629,6 +645,9 @@ namespace GHelper.Input
 
             switch (action)
             {
+                case "menu":
+                    KeyboardHook.KeyPress(Keys.Apps);
+                    break;
                 case "mute":
                     KeyboardHook.KeyPress(Keys.VolumeMute);
                     break;

@@ -35,8 +35,9 @@ namespace GHelper.Input
 
             if (input == null)
             {
-                Logger.WriteLine($"Input device not found");
-                return false;
+                Logger.WriteLine($"Input device not found, retrying in 5s");
+                Thread.Sleep(5000);
+                return true;
             }
 
             AsusHid.InitInput();

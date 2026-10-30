@@ -45,6 +45,13 @@ namespace GHelper
         // The main entry point for the application
         public static void Main(string[] args)
         {
+            // Targeted helper must not create forms, initialize devices, stop services,
+            // load/apply configuration, or participate in the single-instance path.
+            if (VramElevation.IsHelperAction(args))
+            {
+                Environment.ExitCode = VramElevation.ExecuteHelper(args);
+                return;
+            }
             Application.SetHighDpiMode(HighDpiMode.SystemAware);
 
             AppDomain.CurrentDomain.UnhandledException += (s, e) => Logger.WriteLine("Unhandled: " + e.ExceptionObject);
@@ -111,7 +118,7 @@ namespace GHelper
             }
 
             ProcessHelper.KillSmartDisplayControl();
-            AsusService.StopOnStartup();
+            if (!action.StartsWith("services", StringComparison.Ordinal)) AsusService.StopOnStartup();
 
             Application.EnableVisualStyles();
 
@@ -119,7 +126,7 @@ namespace GHelper
 
             trayIcon = new NotifyIcon
             {
-                Text = "G-Helper",
+                Text = AppBuildInfo.DisplayName,
                 Icon = Properties.Resources.standard,
                 Visible = true
             };
@@ -189,10 +196,16 @@ namespace GHelper
                     Startup.ReScheduleAdmin();
                     settingsForm.FansToggle(1);
                     break;
-                case "services":
+                case "services-start":
+                case "services-stop":
                     settingsForm.extraForm = new Extra();
                     settingsForm.extraForm.Show();
-                    settingsForm.extraForm.ServiesToggle();
+                    settingsForm.extraForm.ApplyServiceAction(action == "services-start",
+                        args.Length > 1 ? args[1].Split(',', StringSplitOptions.RemoveEmptyEntries) : Array.Empty<string>());
+                    break;
+                case "services": // Legacy action opens the controls; never infer/toggle intent.
+                    settingsForm.extraForm = new Extra();
+                    settingsForm.extraForm.Show();
                     break;
                 case "uv":
                     Startup.ReScheduleAdmin();

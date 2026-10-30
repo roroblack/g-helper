@@ -39,9 +39,9 @@ namespace GHelper.Mode
         [DllImport("powrprof.dll")]
         static extern uint PowerReadACValue(
             IntPtr RootPowerKey,
-            Guid SchemeGuid,
-            Guid SubGroupOfPowerSettingGuid,
-            Guid PowerSettingGuid,
+            [MarshalAs(UnmanagedType.LPStruct)] Guid SchemeGuid,
+            [MarshalAs(UnmanagedType.LPStruct)] Guid SubGroupOfPowerSettingGuid,
+            [MarshalAs(UnmanagedType.LPStruct)] Guid PowerSettingGuid,
             ref int Type,
             ref IntPtr Buffer,
             ref uint BufferSize
@@ -77,7 +77,38 @@ namespace GHelper.Mode
         public static extern uint PowerGetEffectiveOverlayScheme(out Guid EffectiveOverlayGuid);
 
         [DllImportAttribute("powrprof.dll", EntryPoint = "PowerSetActiveOverlayScheme")]
-        public static extern uint PowerSetActiveOverlayScheme(Guid OverlaySchemeGuid);
+        public static extern uint PowerSetActiveOverlayScheme([MarshalAs(UnmanagedType.LPStruct)] Guid OverlaySchemeGuid);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr memory);
+
+        // Overlay getters return a GUID into caller-owned storage (not a GUID** allocation).
+        // Only PowerGetActiveScheme allocates memory which the caller frees with LocalFree.
+        public static string ApplyOverlayOnly(Guid overlay)
+        {
+            try
+            {
+                return PerModePower.ApplyVerified(overlay, GetBatterySaverStatus,
+                    () => { uint error = PowerGetActualOverlayScheme(out Guid actual); return (error, actual); },
+                    () => { uint error = PowerGetEffectiveOverlayScheme(out Guid effective); return (error, effective); },
+                    PowerSetActiveOverlayScheme);
+            }
+            catch (EntryPointNotFoundException) { return "unsupported-api"; }
+            catch (DllNotFoundException) { return "unsupported-api"; }
+        }
+
+        // Diagnostic observations only: neither getter is promoted to unique OS truth.
+        // Read independently so a missing/failed actual export cannot hide effective.
+        public static string ReadOverlayAudit()
+        {
+            static string Read(string name, Func<(uint Status, Guid Value)> read)
+            {
+                try { var v = read(); return $"{name}Status={v.Status} {name}={v.Value:D}"; }
+                catch (Exception ex) { return $"{name}Status=exception:{ex.GetType().Name} {name}=unavailable"; }
+            }
+            return Read("actual", () => { uint s = PowerGetActualOverlayScheme(out Guid g); return (s, g); }) + " " +
+                Read("effective", () => { uint s = PowerGetEffectiveOverlayScheme(out Guid g); return (s, g); });
+        }
 
         const string POWER_SILENT = "961cc777-2547-4f9d-8174-7d86181b8a7a";
         const string POWER_BALANCED = "00000000-0000-0000-0000-000000000000";
@@ -101,10 +132,11 @@ namespace GHelper.Mode
             };
         static Guid GetActiveScheme()
         {
-            IntPtr pActiveSchemeGuid;
-            var hr = PowerGetActiveScheme(IntPtr.Zero, out pActiveSchemeGuid);
-            Guid activeSchemeGuid = (Guid)Marshal.PtrToStructure(pActiveSchemeGuid, typeof(Guid));
-            return activeSchemeGuid;
+            uint hr = PowerGetActiveScheme(IntPtr.Zero, out IntPtr pointer);
+            if (hr != 0 || pointer == IntPtr.Zero)
+                throw new InvalidOperationException($"PowerGetActiveScheme failed: {hr}");
+            try { return Marshal.PtrToStructure<Guid>(pointer); }
+            finally { LocalFree(pointer); }
         }
 
         public static int GetCPUBoost()
@@ -153,6 +185,53 @@ namespace GHelper.Mode
             if (GetActiveScheme().ToString() == PLAN_HIGH_PERFORMANCE) return PLAN_HIGH_PERFORMANCE;
             PowerGetEffectiveOverlayScheme(out Guid activeScheme);
             return activeScheme.ToString();
+        }
+
+        public static string GetOSOverlay()
+        {
+            uint status = PowerGetEffectiveOverlayScheme(out Guid overlay);
+            if (status != 0) throw new InvalidOperationException($"Windows overlay capture failed: {status}");
+            if (!overlays.Contains(overlay.ToString())) throw new InvalidOperationException("Windows overlay unsupported; snapshot unchanged");
+            return overlay.ToString();
+        }
+
+        public static string GetPowerPlan() => GetActiveScheme().ToString();
+
+        public static int GetOSBoost(bool dc)
+        {
+            Guid scheme = GetActiveScheme();
+            IntPtr value;
+            uint status = dc ? PowerReadDCValueIndex(IntPtr.Zero, scheme, GUID_CPU, GUID_BOOST, out value)
+                : PowerReadACValueIndex(IntPtr.Zero, scheme, GUID_CPU, GUID_BOOST, out value);
+            return status == 0 ? value.ToInt32() : -1;
+        }
+
+        public static PolicyRestoreResult RestoreOSPolicy(string plan, string overlay, int boostAC, int boostDC)
+        {
+            try
+            {
+                // Validate the complete saved snapshot before performing any OS writes. No guessed defaults.
+                if (!Guid.TryParse(plan, out var originalPlan) || originalPlan == Guid.Empty ||
+                    !Guid.TryParse(overlay, out var originalOverlay) || !overlays.Contains(overlay) ||
+                    boostAC < 0 || boostAC > 6 || boostDC < 0 || boostDC > 6)
+                    return new(false, "Windows snapshot invalid or incomplete; no OS writes attempted");
+                uint planStatus = PowerSetActiveScheme(IntPtr.Zero, originalPlan);
+                if (planStatus != 0) throw new InvalidOperationException($"Windows plan restore failed: {planStatus}");
+                if (!string.Equals(GetPowerPlan(), plan, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Windows plan restore readback mismatch");
+                if (PowerWriteACValueIndex(IntPtr.Zero, originalPlan, GUID_CPU, GUID_BOOST, boostAC) != 0)
+                    throw new InvalidOperationException("Windows AC boost restore failed");
+                if (PowerWriteDCValueIndex(IntPtr.Zero, originalPlan, GUID_CPU, GUID_BOOST, boostDC) != 0)
+                    throw new InvalidOperationException("Windows DC boost restore failed");
+                if (PowerSetActiveScheme(IntPtr.Zero, originalPlan) != 0)
+                    throw new InvalidOperationException("Windows plan activation failed");
+                if (GetOSBoost(false) != boostAC || GetOSBoost(true) != boostDC)
+                    throw new InvalidOperationException("Windows AC/DC boost readback mismatch");
+                string overlayResult = ApplyOverlayOnly(originalOverlay);
+                if (overlayResult != "applied") throw new InvalidOperationException("Windows overlay restore: " + overlayResult);
+                return new(true, "Windows plan, AC/DC boost and effective overlay verified; firmware effective mode unverified");
+            }
+            catch (Exception ex) { return new(false, ex.GetType().Name + ": " + ex.Message); }
         }
 
         public static void SetPowerMode(string scheme)

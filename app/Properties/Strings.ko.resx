@@ -818,6 +818,9 @@
   <data name="Silent" xml:space="preserve">
     <value>조용</value>
   </data>
+  <data name="Manual" xml:space="preserve">
+    <value>수동</value>
+  </data>
   <data name="Sleep" xml:space="preserve">
     <value>절전</value>
   </data>

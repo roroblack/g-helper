@@ -447,6 +447,7 @@ public static class HardwareControl
 
     public static float? GetCPUTemp()
     {
+        if (AsusACPI.N1xRestricted) return (float?)N1xTelemetryReader.Shared.PeekAndRequest().CpuTemperature.Value;
         var last = DateTimeOffset.Now.ToUnixTimeSeconds();
         if (Math.Abs(last - lastUpdate) < 2) return cpuTemp;
         lastUpdate = last;
@@ -497,6 +498,7 @@ public static class HardwareControl
 
     public static float? GetGPUTemp()
     {
+        if (AsusACPI.N1xRestricted) return (float?)N1xTelemetryReader.Shared.PeekAndRequest().GpuTemperature.Value;
         try
         {
             gpuTemp = GpuControl?.GetCurrentTemperature();
@@ -530,6 +532,7 @@ public static class HardwareControl
 
     public static void InitCPUPowerAsync()
     {
+        if (AsusACPI.N1xRestricted) return;
         if (_cpuPowerInitStarted) return;
         _cpuPowerInitStarted = true;
 
@@ -667,8 +670,13 @@ public static class HardwareControl
         }
     }
 
+    // Shared rail is read-only display data, separate from CPU-only watts and charts.
+    public static float? GetCpuMemoryPower() => AsusACPI.N1xRestricted
+        ? (float?)N1xTelemetryReader.Shared.PeekAndRequest().CpuMemoryPower.Value : null;
+
     public static float? GetCPUPower()
     {
+        if (AsusACPI.N1xRestricted) return (float?)N1xTelemetryReader.Shared.PeekAndRequest().CpuPower.Value;
         if (_cpuPowerCounterFailed || _cpuPowerCounter == null) return null;
 
         try
@@ -789,6 +797,7 @@ public static class HardwareControl
 
     private static float? GetIntelMsrPower()
     {
+        if (AsusACPI.N1xRestricted) return null;
         if (_intelMsrPowerFailed || PawnIO.CpuInfo.IsAMD) return null;
         try
         {
@@ -818,6 +827,7 @@ public static class HardwareControl
 
     public static float? GetGPUPower()
     {
+        if (AsusACPI.N1xRestricted) return (float?)N1xTelemetryReader.Shared.PeekAndRequest().GpuPower.Value;
         try
         {
             float? power = GpuControl?.GetGpuPower();
@@ -856,8 +866,10 @@ public static class HardwareControl
 
         if (readFans)
         {
-            cpuFanRPM = Program.acpi.GetFan(AsusFan.CPU) * 100;
-            gpuFanRPM = Program.acpi.GetFan(AsusFan.GPU) * 100;
+            int cpuRaw = Program.acpi.GetFan(AsusFan.CPU);
+            int gpuRaw = Program.acpi.GetFan(AsusFan.GPU);
+            cpuFanRPM = cpuRaw < 0 ? null : cpuRaw * 100;
+            gpuFanRPM = gpuRaw < 0 ? null : gpuRaw * 100;
         }
         else
         {

@@ -58,6 +58,7 @@ namespace GHelper
             buttonSilent = new RButton();
             buttonBalanced = new RButton();
             buttonTurbo = new RButton();
+            buttonManual = new RButton();
             buttonFans = new RButton();
             panelCPUTitle = new Panel();
             picturePerf = new PictureBox();
@@ -531,15 +532,17 @@ namespace GHelper
             // 
             tablePerf.AutoSize = true;
             tablePerf.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            tablePerf.ColumnCount = 4;
-            tablePerf.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
-            tablePerf.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
-            tablePerf.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
-            tablePerf.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
+            tablePerf.ColumnCount = 5;
+            tablePerf.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
+            tablePerf.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
+            tablePerf.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
+            tablePerf.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
+            tablePerf.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
             tablePerf.Controls.Add(buttonSilent, 0, 0);
             tablePerf.Controls.Add(buttonBalanced, 1, 0);
             tablePerf.Controls.Add(buttonTurbo, 2, 0);
-            tablePerf.Controls.Add(buttonFans, 3, 0);
+            tablePerf.Controls.Add(buttonManual, 3, 0);
+            tablePerf.Controls.Add(buttonFans, 4, 0);
             tablePerf.Dock = DockStyle.Top;
             tablePerf.Location = new Point(20, 60);
             tablePerf.Margin = new Padding(8, 4, 8, 4);
@@ -616,6 +619,27 @@ namespace GHelper
             buttonTurbo.TextImageRelation = TextImageRelation.ImageAboveText;
             buttonTurbo.UseVisualStyleBackColor = false;
             // 
+            // buttonManual
+            // 
+            buttonManual.Activated = false;
+            buttonManual.BackColor = SystemColors.ControlLightLight;
+            buttonManual.BorderColor = Color.Transparent;
+            buttonManual.BorderRadius = 5;
+            buttonManual.Dock = DockStyle.Fill;
+            buttonManual.FlatAppearance.BorderSize = 0;
+            buttonManual.FlatStyle = FlatStyle.Flat;
+            buttonManual.ForeColor = SystemColors.ControlText;
+            buttonManual.Image = Properties.Resources.icons8_flash_48;
+            buttonManual.ImageAlign = ContentAlignment.BottomCenter;
+            buttonManual.Margin = new Padding(4);
+            buttonManual.Name = "buttonManual";
+            buttonManual.Secondary = false;
+            buttonManual.Size = new Size(188, 120);
+            buttonManual.TabIndex = 4;
+            buttonManual.Text = "&Manual";
+            buttonManual.TextImageRelation = TextImageRelation.ImageAboveText;
+            buttonManual.UseVisualStyleBackColor = false;
+            // 
             // buttonFans
             // 
             buttonFans.Activated = false;
@@ -664,13 +688,15 @@ namespace GHelper
             // labelPerf
             // 
             labelPerf.AccessibleRole = AccessibleRole.Caret;
-            labelPerf.AutoSize = true;
+            labelPerf.AutoSize = false;
+            labelPerf.AutoEllipsis = true;
+            labelPerf.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             labelPerf.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
             labelPerf.LiveSetting = System.Windows.Forms.Automation.AutomationLiveSetting.Polite;
             labelPerf.Location = new Point(40, 0);
             labelPerf.Margin = new Padding(8, 0, 8, 0);
             labelPerf.Name = "labelPerf";
-            labelPerf.Size = new Size(234, 32);
+            labelPerf.Size = new Size(339, 36);
             labelPerf.TabIndex = 0;
             labelPerf.Text = "Performance Mode";
             // 
@@ -2026,7 +2052,7 @@ namespace GHelper
             // labelVersion
             // 
             labelVersion.Cursor = Cursors.Hand;
-            labelVersion.Dock = DockStyle.Left;
+            labelVersion.Dock = DockStyle.Fill;
             labelVersion.Font = new Font("Segoe UI", 9F, FontStyle.Underline);
             labelVersion.ForeColor = SystemColors.ControlDark;
             labelVersion.Location = new Point(20, 5);
@@ -2190,6 +2216,7 @@ namespace GHelper
         private RButton buttonMiniled;
         private RButton buttonMatrix;
         private RColorButton buttonKeyboardColor;
+        private RButton buttonManual;
         private RButton buttonFans;
         private Slider sliderBattery;
         private Panel panelGPUTitle;

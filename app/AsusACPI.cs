@@ -287,7 +287,7 @@ public class AsusACPI
         return _connected;
     }
 
-    public AsusACPI()
+    public AsusACPI(bool firmwareHelperOnly = false)
     {
         try
         {
@@ -308,6 +308,10 @@ public class AsusACPI
         {
             Logger.WriteLine($"Can't connect to ACPI: {ex.Message}");
         }
+
+        // Only open the ACPI transport for the one-shot memory helper.
+        // Do not initialize AppConfig or unrelated model-specific controllers.
+        if (firmwareHelperOnly) return;
 
         if (AppConfig.IsAdvantageEdition())
         {
@@ -431,6 +435,7 @@ public class AsusACPI
 
     public int DeviceSet(uint DeviceID, int Status, string? logName)
     {
+        if (IsN1xWriteBlocked(DeviceID)) return -1;
         byte[] args = new byte[8];
         BitConverter.GetBytes((uint)DeviceID).CopyTo(args, 0);
         BitConverter.GetBytes((uint)Status).CopyTo(args, 4);
@@ -447,6 +452,7 @@ public class AsusACPI
 
     public int DeviceSet(uint DeviceID, byte[] Params, string? logName)
     {
+        if (IsN1xWriteBlocked(DeviceID)) return -1;
         byte[] args = new byte[4 + Params.Length];
         BitConverter.GetBytes((uint)DeviceID).CopyTo(args, 0);
         Params.CopyTo(args, 4);
@@ -463,6 +469,7 @@ public class AsusACPI
 
     public static void DeviceSetWmi(uint DeviceID, int Status)
     {
+        if (IsN1xWriteBlocked(DeviceID)) return;
         try
         {
             using var wmi = new ManagementObjectSearcher(@"root\wmi", "SELECT * FROM AsusAtkWmi_WMNB").Get().Cast<ManagementObject>().First();
@@ -476,6 +483,15 @@ public class AsusACPI
         {
             Logger.WriteLine("WMI DEVS: " + ex.Message);
         }
+    }
+
+    public static bool N1xRestricted => GHelper.Fan.N1xFanPowerPolicy.IsTarget(AppConfig.GetModel());
+
+    private static bool IsN1xWriteBlocked(uint id)
+    {
+        if (!GHelper.Fan.N1xFanPowerPolicy.BlocksWrite(AppConfig.GetModel(), id)) return false;
+        Logger.WriteLine($"N1X write blocked: 0x{id:X8}; endpoint/encoding/limits/effective readback unverified");
+        return true;
     }
 
     public int DeviceGet(uint DeviceID)
@@ -555,6 +571,19 @@ public class AsusACPI
             AsusFan.Mid => Mid_Fan,
             _ => CPU_Fan,
         };
+
+        if (GHelper.Fan.N1xFanPowerPolicy.IsTarget(AppConfig.GetModel()))
+        {
+            byte[] input = new byte[16];
+            BitConverter.GetBytes(DSTS).CopyTo(input, 0);
+            BitConverter.GetBytes(8u).CopyTo(input, 4);
+            BitConverter.GetBytes(endpoint).CopyTo(input, 8);
+            byte[] output = new byte[16];
+            uint returned = 0;
+            bool ok = DeviceIoControl(handle, CONTROL_CODE, input, (uint)input.Length,
+                output, (uint)output.Length, ref returned, IntPtr.Zero);
+            return GHelper.Fan.N1xFanPowerPolicy.DecodeFan(ok, returned, output);
+        }
 
         int raw = Program.acpi.DeviceGet(endpoint);
         int fan = raw & 0xFFFF;
@@ -811,29 +840,89 @@ public class AsusACPI
     {
         unitMb = 0;
         byte[] buf = DeviceGetLarge(VRAM_MEM);
+        Logger.WriteLine("VRAM table raw: " + BitConverter.ToString(buf, 0, Math.Min(buf.Length, 40)));
+        return ParseVramOptions(buf, out unitMb);
+    }
+
+    private static int[] ParseVramOptions(byte[] buf, out int unitMb)
+    {
+        unitMb = 0;
+        if (buf.Length < 8) return [];
         int status = BitConverter.ToInt32(buf, 0);
-
-        if ((status & 0x10000) == 0 || (status & 0x80000) != 0) return [];
-
-        int count = Math.Min(status & 0xFFFF, (buf.Length - 6) / 2);
-        if (count < 2) return [];
-
+        if ((status & 0x10000) == 0) return [];
+        int count = status & 0xFFFF;
+        if (count < 1 || count > (buf.Length - 6) / 2) return [];
         unitMb = (status & 0x20000) != 0 ? 512 : 1;
 
         int[] options = new int[count];
-        for (int i = 1; i < count; i++) options[i] = BitConverter.ToUInt16(buf, 6 + i * 2);
+        for (int i = 0; i < count; i++) options[i] = BitConverter.ToUInt16(buf, 6 + i * 2);
 
         return options;
     }
 
     public int GetVramMem()
     {
-        return (int)BitConverter.ToUInt32(DeviceGetLarge(VRAM_MEM), 4);
+        byte[] buf = DeviceGetLarge(VRAM_MEM);
+        if (ParseVramOptions(buf, out _).Length == 0) return -1;
+        return BitConverter.ToUInt16(buf, 4);
     }
 
-    public void SetVramMem(int value)
+    public bool TryGetVramTransport(int value, out bool uefi, out string error)
     {
-        DeviceSet(VRAM_MEM, value, "VRAM Mem");
+        byte[] table = DeviceGetLarge(VRAM_MEM);
+        int[] options = ParseVramOptions(table, out _);
+        uefi = false;
+        error = "";
+        if (Array.IndexOf(options, value) < 0)
+        {
+            error = "Requested value is not advertised by the current firmware table.";
+            return false;
+        }
+        uefi = (BitConverter.ToInt32(table, 0) & 0x80000) != 0;
+        Logger.WriteLine($"VRAM apply table={BitConverter.ToString(table)} raw={value} UEFI={uefi}");
+        return true;
+    }
+
+    public bool SetUefiVramMem(int value, out string error)
+    {
+        // Re-read and validate in the elevated process, not just in the caller.
+        if (!TryGetVramTransport(value, out bool uefi, out error)) return false;
+        if (!uefi)
+        {
+            error = "Firmware no longer advertises the UEFI transport. No fallback write was attempted.";
+            return false;
+        }
+        bool verified = VramFirmware.TrySet(value, out error);
+        Logger.WriteLine($"VRAM UEFI helper raw={value}: {(verified ? "variable readback verified; reboot pending; active allocation unverified" : error)}");
+        return verified;
+    }
+
+    public bool SetVramMem(int value, out string error)
+    {
+        byte[] buf = DeviceGetLarge(VRAM_MEM);
+        error = "";
+        int[] options = ParseVramOptions(buf, out _);
+        if (Array.IndexOf(options, value) < 0)
+        {
+            error = "Requested value is not advertised by the firmware table.";
+            Logger.WriteLine("VRAM request rejected: " + error);
+            return false;
+        }
+        int status = BitConverter.ToInt32(buf, 0);
+        if ((status & 0x80000) != 0)
+        {
+            bool verified = VramFirmware.TrySet(value, out error);
+            Logger.WriteLine($"VRAM UEFI request raw={value}: {(verified ? "variable readback verified; active allocation unverified" : error)}");
+            return verified;
+        }
+        int result = DeviceSet(VRAM_MEM, value, "VRAM Mem request");
+        if (result != 1)
+        {
+            error = $"ACPI DEVS returned {result}; request was not accepted.";
+            return false;
+        }
+        Logger.WriteLine($"VRAM ACPI request raw={value} accepted; firmware readback={GetVramMem()}; active allocation unverified until reboot.");
+        return true;
     }
 
     public (int, int) GetCores(uint device = CORES_CPU)
@@ -905,6 +994,18 @@ public class AsusACPI
         BitConverter.GetBytes((uint)(4 + extraIn)).CopyTo(acpiBuf, 4);
         BitConverter.GetBytes((uint)DeviceID).CopyTo(acpiBuf, 8);
 
+        if (DeviceID == VRAM_MEM)
+        {
+            uint returned = 0;
+            bool ok = DeviceIoControl(handle, CONTROL_CODE, acpiBuf, (uint)acpiBuf.Length,
+                outBuffer, (uint)outBuffer.Length, ref returned, IntPtr.Zero);
+            if (!ok || returned > outBuffer.Length || returned < 8)
+            {
+                Logger.WriteLine($"VRAM table I/O failed: ok={ok} bytes={returned} Win32={Marshal.GetLastPInvokeError()}");
+                return [];
+            }
+            return outBuffer.AsSpan(0, checked((int)returned)).ToArray();
+        }
         Control(CONTROL_CODE, acpiBuf, outBuffer);
         return outBuffer;
     }
